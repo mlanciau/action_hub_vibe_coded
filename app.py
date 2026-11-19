@@ -1,4 +1,5 @@
 import hmac
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ from google.cloud import bigquery
 
 
 ACTION_NAME = "bigquery_cell_capture"
+QUERY_ACTION_NAME = "bigquery_query_sql_capture"
 CATEGORY_OPTIONS = (
     ("review", "Review"),
     ("follow_up", "Follow up"),
@@ -55,12 +57,42 @@ def create_app(
             app.logger.error("ACTION_HUB_BASE_URL is not configured.")
             return jsonify({"error": "Action Hub URL is not configured."}), 503
 
-        action_url = f"{base_url}/actions/{ACTION_NAME}"
+        params = [
+            {
+                "name": "project_id",
+                "label": "BigQuery project ID",
+                "description": "Google Cloud project containing the destination table.",
+                "required": True,
+                "sensitive": False,
+                "user_attribute_name": None,
+            },
+            {
+                "name": "dataset_id",
+                "label": "BigQuery dataset ID",
+                "required": True,
+                "sensitive": False,
+                "user_attribute_name": None,
+            },
+            {
+                "name": "table_id",
+                "label": "BigQuery table ID",
+                "required": True,
+                "sensitive": False,
+                "user_attribute_name": None,
+            },
+        ]
+        shared_action_settings = {
+            "form_url": f"{base_url}/actions/{ACTION_NAME}/form",
+            "params": params,
+            "supported_download_settings": ["push"],
+            "uses_oauth": False,
+        }
         return jsonify(
             {
                 "label": os.environ.get("ACTION_HUB_LABEL", "BigQuery Cell Actions"),
                 "integrations": [
                     {
+                        **shared_action_settings,
                         "name": ACTION_NAME,
                         "label": "Save cell to BigQuery",
                         "description": (
@@ -69,41 +101,30 @@ def create_app(
                         ),
                         "supported_action_types": ["cell"],
                         "required_fields": [{"tag": "bigquery_write"}],
-                        "url": f"{action_url}/execute",
-                        "form_url": f"{action_url}/form",
-                        "params": [
-                            {
-                                "name": "project_id",
-                                "label": "BigQuery project ID",
-                                "description": "Google Cloud project containing the destination table.",
-                                "required": True,
-                                "sensitive": False,
-                                "user_attribute_name": None,
-                            },
-                            {
-                                "name": "dataset_id",
-                                "label": "BigQuery dataset ID",
-                                "required": True,
-                                "sensitive": False,
-                                "user_attribute_name": None,
-                            },
-                            {
-                                "name": "table_id",
-                                "label": "BigQuery table ID",
-                                "required": True,
-                                "sensitive": False,
-                                "user_attribute_name": None,
-                            },
-                        ],
-                        "supported_download_settings": ["push"],
-                        "uses_oauth": False,
-                    }
+                        "url": f"{base_url}/actions/{ACTION_NAME}/execute",
+                    },
+                    {
+                        **shared_action_settings,
+                        "name": QUERY_ACTION_NAME,
+                        "label": "Save Explore SQL to BigQuery",
+                        "description": (
+                            "Save the SQL generated for a Looker Explore query "
+                            "to BigQuery."
+                        ),
+                        "supported_action_types": ["query"],
+                        "supported_formats": ["json_detail"],
+                        "required_fields": [],
+                        "url": f"{base_url}/actions/{QUERY_ACTION_NAME}/execute",
+                        "form_url": f"{base_url}/actions/{QUERY_ACTION_NAME}/form",
+                    },
                 ],
             }
         )
 
-    @app.post(f"/actions/{ACTION_NAME}/form")
-    def action_form():
+    @app.post("/actions/<action_name>/form")
+    def action_form(action_name: str):
+        if action_name not in {ACTION_NAME, QUERY_ACTION_NAME}:
+            return jsonify({"error": "Unknown action."}), 404
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
             payload = {}
@@ -112,19 +133,45 @@ def create_app(
             form_params = {}
         return jsonify({"fields": get_form_fields(form_params)})
 
-    @app.post(f"/actions/{ACTION_NAME}/execute")
-    def execute_action():
+    @app.post("/actions/<action_name>/execute")
+    def execute_action(action_name: str):
+        if action_name not in {ACTION_NAME, QUERY_ACTION_NAME}:
+            return jsonify({"error": "Unknown action."}), 404
+
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
             return looker_response(False, "Request body must be a JSON object.", 400)
-        if payload.get("type") != "cell":
-            return looker_response(False, "This action only supports cell payloads.", 400)
 
-        data = payload.get("data")
-        if not isinstance(data, dict):
-            return looker_response(False, "The cell data is missing.", 400)
-        if "value" not in data or not isinstance(data["value"], str):
-            return looker_response(False, "The cell value is missing or invalid.", 400)
+        field_value = None
+        generated_sql = None
+        if action_name == ACTION_NAME:
+            if payload.get("type") != "cell":
+                return looker_response(
+                    False,
+                    "This action only supports cell payloads.",
+                    400,
+                )
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                return looker_response(False, "The cell data is missing.", 400)
+            if "value" not in data or not isinstance(data["value"], str):
+                return looker_response(False, "The cell value is missing or invalid.", 400)
+            field_value = data["value"]
+        else:
+            if payload.get("type") != "query":
+                return looker_response(
+                    False,
+                    "This action only supports query payloads.",
+                    400,
+                )
+            generated_sql = extract_generated_sql(payload)
+            if generated_sql is None:
+                return looker_response(
+                    False,
+                    "The query attachment does not contain generated SQL. "
+                    "Ensure Looker sends json_detail format.",
+                    400,
+                )
 
         form_params = payload.get("form_params")
         if not isinstance(form_params, dict):
@@ -149,7 +196,9 @@ def create_app(
                 validation_errors={"notes": "Notes must be text."},
             )
 
-        settings = payload.get("data", {})
+        settings = payload.get("data")
+        if not isinstance(settings, dict):
+            return looker_response(False, "Action settings are missing.", 400)
         destination: dict[str, str] = {}
         for key in ("project_id", "dataset_id", "table_id"):
             value = settings.get(key)
@@ -162,10 +211,11 @@ def create_app(
             destination[key] = value.strip()
 
         row = build_row(
-            field_value=data["value"],
+            field_value=field_value,
             category=category,
             notes=notes,
             looker_instance=request.headers.get("X-Looker-Instance"),
+            generated_sql=generated_sql,
         )
         table_id = (
             f"{destination['project_id']}."
@@ -194,7 +244,12 @@ def create_app(
                 502,
             )
 
-        return looker_response(True, "Cell saved to BigQuery.", 200)
+        message = (
+            "Cell saved to BigQuery."
+            if action_name == ACTION_NAME
+            else "Explore SQL saved to BigQuery."
+        )
+        return looker_response(True, message, 200)
 
     return app
 
@@ -230,11 +285,34 @@ def get_form_fields(form_params: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def extract_generated_sql(payload: dict[str, Any]) -> str | None:
+    attachment = payload.get("attachment")
+    if not isinstance(attachment, dict):
+        return None
+
+    content = attachment.get("data")
+    if isinstance(content, str):
+        try:
+            detail = json.loads(content)
+        except json.JSONDecodeError:
+            return None
+    elif isinstance(content, dict):
+        detail = content
+    else:
+        return None
+
+    if not isinstance(detail, dict):
+        return None
+    sql = detail.get("sql")
+    return sql if isinstance(sql, str) and sql.strip() else None
+
+
 def build_row(
-    field_value: str,
+    field_value: str | None,
     category: str,
     notes: str,
     looker_instance: str | None,
+    generated_sql: str | None = None,
 ) -> dict[str, str | None]:
     return {
         "inserted_at": datetime.now(timezone.utc).isoformat(),
@@ -242,6 +320,7 @@ def build_row(
         "category": category,
         "notes": notes,
         "looker_instance": looker_instance,
+        "generated_sql": generated_sql,
     }
 
 

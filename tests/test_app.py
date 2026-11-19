@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from app import CATEGORY_OPTIONS, create_app
+from app import CATEGORY_OPTIONS, QUERY_ACTION_NAME, create_app
 
 
 class FakeBigQueryClient:
@@ -20,7 +20,13 @@ class FakeBigQueryClient:
 class ActionHubTest(unittest.TestCase):
     def setUp(self):
         self.client = FakeBigQueryClient()
-        self.app = create_app(lambda _project_id: self.client)
+        self.client_project_id: str | None = None
+
+        def client_factory(project_id):
+            self.client_project_id = project_id
+            return self.client
+
+        self.app = create_app(client_factory)
         self.app.config["TESTING"] = True
         self.http = self.app.test_client()
         self.environment = patch.dict(
@@ -44,6 +50,11 @@ class ActionHubTest(unittest.TestCase):
         self.assertEqual(action["form_url"], (
             "https://actions.example.test/actions/bigquery_cell_capture/form"
         ))
+        query_action = response.get_json()["integrations"][1]
+        self.assertEqual(query_action["name"], QUERY_ACTION_NAME)
+        self.assertEqual(query_action["supported_action_types"], ["query"])
+        self.assertEqual(query_action["supported_formats"], ["json_detail"])
+        self.assertEqual(query_action["required_fields"], [])
 
     def test_form_has_custom_category_and_notes_fields(self):
         response = self.http.post(
@@ -92,12 +103,92 @@ class ActionHubTest(unittest.TestCase):
             self.client.inserted_table,
             "demo-project.feedback.looker_cell_actions",
         )
+        self.assertEqual(self.client_project_id, "demo-project")
+        assert self.client.inserted_rows is not None
         row = self.client.inserted_rows[0]
         self.assertEqual(row["field_value"], "customer-42")
         self.assertEqual(row["category"], "review")
         self.assertEqual(row["notes"], "Verify this row")
         self.assertEqual(row["looker_instance"], "looker.example.test")
+        self.assertIsNone(row["generated_sql"])
         self.assertTrue(row["inserted_at"].endswith("+00:00"))
+
+    def test_execute_query_inserts_generated_sql(self):
+        sql = "SELECT customer_id FROM customers"
+        response = self.http.post(
+            f"/actions/{QUERY_ACTION_NAME}/execute",
+            json={
+                "type": "query",
+                "data": {
+                    "project_id": "demo-project",
+                    "dataset_id": "feedback",
+                    "table_id": "looker_cell_actions",
+                },
+                "attachment": {
+                    "mimetype": "application/json",
+                    "extension": "json",
+                    "data": {"sql": sql},
+                },
+                "form_params": {"category": "review", "notes": "Explore query"},
+            },
+            headers={**self.headers, "X-Looker-Instance": "looker.example.test"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["looker"]["success"])
+        assert self.client.inserted_rows is not None
+        row = self.client.inserted_rows[0]
+        self.assertIsNone(row["field_value"])
+        self.assertEqual(row["generated_sql"], sql)
+        self.assertEqual(row["category"], "review")
+
+    def test_execute_query_accepts_json_string_attachment(self):
+        sql = "SELECT order_id FROM orders"
+        response = self.http.post(
+            f"/actions/{QUERY_ACTION_NAME}/execute",
+            json={
+                "type": "query",
+                "data": {
+                    "project_id": "demo-project",
+                    "dataset_id": "feedback",
+                    "table_id": "looker_cell_actions",
+                },
+                "attachment": {
+                    "mimetype": "application/json",
+                    "extension": "json",
+                    "data": f'{{"sql":"{sql}"}}',
+                },
+                "form_params": {"category": "review"},
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        assert self.client.inserted_rows is not None
+        self.assertEqual(self.client.inserted_rows[0]["generated_sql"], sql)
+
+    def test_execute_query_rejects_attachment_without_sql(self):
+        response = self.http.post(
+            f"/actions/{QUERY_ACTION_NAME}/execute",
+            json={
+                "type": "query",
+                "data": {
+                    "project_id": "demo-project",
+                    "dataset_id": "feedback",
+                    "table_id": "looker_cell_actions",
+                },
+                "attachment": {
+                    "mimetype": "application/json",
+                    "extension": "json",
+                    "data": {"fields": {}, "data": []},
+                },
+                "form_params": {"category": "review"},
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIsNone(self.client.inserted_rows)
 
     def test_execute_rejects_invalid_category_without_writing(self):
         response = self.http.post(

@@ -8,6 +8,8 @@ selected Looker field value, along with a custom form response, to BigQuery.
 - Appears on fields tagged `bigquery_write`.
 - Shows a form with a category dropdown and optional notes.
 - Inserts one row per action into a BigQuery table.
+- Also exposes a query-level action that stores Looker's generated SQL from
+  the `json_detail` attachment, one row per Explore query.
 - Uses Application Default Credentials (ADC); it does not collect Google
   service-account credentials in Looker.
 
@@ -20,6 +22,7 @@ existing table):
 CREATE TABLE `your-project.your_dataset.looker_cell_actions` (
   inserted_at TIMESTAMP NOT NULL,
   field_value STRING,
+  generated_sql STRING,
   category STRING,
   notes STRING,
   looker_instance STRING
@@ -58,8 +61,11 @@ When adding the hub in Looker under **Admin > Actions**, use
 `ACTION_HUB_TOKEN` as its authorization token. The service expects Looker's
 standard `Authorization: Token token="..."` header. Keep the token secret.
 
-After adding the hub, configure the action's required **BigQuery project ID**,
-**BigQuery dataset ID**, and **BigQuery table ID** parameters in Looker.
+After adding the hub, configure the required **BigQuery project ID**,
+**BigQuery dataset ID**, and **BigQuery table ID** parameters for each action
+in Looker. The cell action continues to write the selected value;
+**Save Explore SQL to BigQuery** is a query-level action that writes the SQL
+with `field_value` left `NULL`.
 
 ## Tag fields in LookML
 
@@ -78,7 +84,8 @@ dimension: customer_id {
 Edit `CATEGORY_OPTIONS` and `get_form_fields` in `app.py` to change the
 category choices or form fields. Update `build_row` and the table schema above
 to change what is inserted. Form values arrive as strings in Looker's
-`form_params`.
+`form_params`. The query-level action requires Looker's `json_detail` format,
+which contains the generated SQL.
 
 ## Verify
 
