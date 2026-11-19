@@ -1,2 +1,92 @@
-# action_hub_vibe_coded
-This repo is hosting a Looker action hub vibe coded demo
+# Looker BigQuery Cell Action Hub
+
+A small Python Looker Action Hub that adds a cell-level action for saving a
+selected Looker field value, along with a custom form response, to BigQuery.
+
+## What it does
+
+- Appears on fields tagged `bigquery_write`.
+- Shows a form with a category dropdown and optional notes.
+- Inserts one row per action into a BigQuery table.
+- Uses Application Default Credentials (ADC); it does not collect Google
+  service-account credentials in Looker.
+
+## Configure BigQuery
+
+Create a table with this schema (or adapt `build_row` in `app.py` to match an
+existing table):
+
+```sql
+CREATE TABLE `your-project.your_dataset.looker_cell_actions` (
+  inserted_at TIMESTAMP NOT NULL,
+  field_value STRING,
+  category STRING,
+  notes STRING,
+  looker_instance STRING
+);
+```
+
+Grant the identity used by the action service permission to insert rows into
+the dataset, such as BigQuery Data Editor. For local development, authenticate
+with `gcloud auth application-default login`. In a cloud deployment, prefer
+the platform's attached service account or workload identity over a key file.
+
+## Run locally
+
+Requires Python 3.10 or later.
+
+```sh
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+export ACTION_HUB_BASE_URL="https://your-public-host.example"
+export ACTION_HUB_TOKEN="replace-with-a-long-random-token"
+python app.py
+```
+
+`ACTION_HUB_BASE_URL` must be the externally reachable HTTPS URL of the hub,
+without a trailing slash. Looker requires a trusted HTTPS connection.
+
+For production, run with a WSGI server such as:
+
+```sh
+gunicorn --bind "0.0.0.0:${PORT:-8080}" app:app
+```
+
+When adding the hub in Looker under **Admin > Actions**, use
+`ACTION_HUB_BASE_URL` as the hub URL and enter the exact value of
+`ACTION_HUB_TOKEN` as its authorization token. The service expects Looker's
+standard `Authorization: Token token="..."` header. Keep the token secret.
+
+After adding the hub, configure the action's required **BigQuery project ID**,
+**BigQuery dataset ID**, and **BigQuery table ID** parameters in Looker.
+
+## Tag fields in LookML
+
+Add the required tag to each field where the cell action should appear:
+
+```lookml
+dimension: customer_id {
+  type: string
+  sql: ${TABLE}.customer_id ;;
+  tags: ["bigquery_write"]
+}
+```
+
+## Customize the form and table row
+
+Edit `CATEGORY_OPTIONS` and `get_form_fields` in `app.py` to change the
+category choices or form fields. Update `build_row` and the table schema above
+to change what is inserted. Form values arrive as strings in Looker's
+`form_params`.
+
+## Verify
+
+Run the unit tests with:
+
+```sh
+python -m unittest discover -s tests
+```
+
+The service also exposes an unauthenticated `GET /health` endpoint for
+deployment health checks. Action API endpoints require the configured token.
