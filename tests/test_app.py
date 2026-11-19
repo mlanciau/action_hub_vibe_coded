@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -141,6 +142,57 @@ class ActionHubTest(unittest.TestCase):
         self.assertIsNone(row["field_value"])
         self.assertEqual(row["generated_sql"], sql)
         self.assertEqual(row["category"], "review")
+
+    def test_action_request_logs_non_secret_fields_and_redacts_secrets(self):
+        sql = "SELECT customer_id FROM customers"
+        with self.assertLogs("app", level="INFO") as captured:
+            form_response = self.http.post(
+                "/actions/bigquery_query_sql_capture/form",
+                json={
+                    "form_params": {"notes": "Looker form note"},
+                    "state": {"access_token": "form-access-secret"},
+                },
+                headers=self.headers,
+            )
+            execute_response = self.http.post(
+                f"/actions/{QUERY_ACTION_NAME}/execute",
+                json={
+                    "type": "query",
+                    "data": {
+                        "project_id": "demo-project",
+                        "dataset_id": "feedback",
+                        "table_id": "looker_cell_actions",
+                        "looker_action_token": "payload-action-secret",
+                    },
+                    "attachment": {
+                        "data": json.dumps(
+                            {
+                                "sql": sql,
+                                "refresh_token": "attachment-refresh-secret",
+                            }
+                        ),
+                    },
+                    "form_params": {"category": "review", "notes": "Saved note"},
+                },
+                headers=self.headers,
+            )
+
+        self.assertEqual(form_response.status_code, 200)
+        self.assertEqual(execute_response.status_code, 200)
+        log_output = "\n".join(captured.output)
+        self.assertIn('"endpoint":"form"', log_output)
+        self.assertIn('"endpoint":"execute"', log_output)
+        self.assertIn(sql, log_output)
+        self.assertIn("Looker form note", log_output)
+        self.assertIn("Saved note", log_output)
+        self.assertIn("[REDACTED]", log_output)
+        for secret in (
+            "test-token",
+            "form-access-secret",
+            "payload-action-secret",
+            "attachment-refresh-secret",
+        ):
+            self.assertNotIn(secret, log_output)
 
     def test_execute_query_accepts_json_string_attachment(self):
         sql = "SELECT order_id FROM orders"

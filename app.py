@@ -2,6 +2,7 @@ import hmac
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -18,8 +19,78 @@ CATEGORY_OPTIONS = (
     ("follow_up", "Follow up"),
     ("ignore", "Ignore"),
 )
+_SENSITIVE_LOG_KEY_PATTERN = re.compile(
+    r"authorization|cookie|token|secret|password|credential|state|csrf|"
+    r"private[_-]?key|api[_-]?key|client[_-]?assertion|jwt|signature",
+    re.IGNORECASE,
+)
+_REDACTED_LOG_VALUE = "[REDACTED]"
+_MAX_LOG_PAYLOAD_BYTES = 180 * 1024
 
 BigQueryClientFactory = Callable[[str], Any]
+
+
+def _redact_log_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                _REDACTED_LOG_VALUE
+                if _SENSITIVE_LOG_KEY_PATTERN.search(str(key))
+                else _redact_log_value(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_log_value(item) for item in value]
+    if isinstance(value, str):
+        try:
+            nested_value = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        if isinstance(nested_value, (dict, list)):
+            return json.dumps(
+                _redact_log_value(nested_value),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+    return value
+
+
+def _log_looker_request(
+    app: Flask,
+    action_name: str,
+    endpoint: str,
+    payload: Any,
+) -> None:
+    safe_payload = _redact_log_value(payload)
+    serialized_payload = json.dumps(
+        safe_payload, ensure_ascii=False, separators=(",", ":")
+    )
+    payload_bytes = serialized_payload.encode("utf-8")
+    if len(payload_bytes) > _MAX_LOG_PAYLOAD_BYTES:
+        preview = payload_bytes[:_MAX_LOG_PAYLOAD_BYTES].decode(
+            "utf-8", errors="ignore"
+        )
+        safe_payload = {
+            "truncated": True,
+            "original_bytes": len(payload_bytes),
+            "preview": preview,
+        }
+
+    log_entry = {
+        "event": "looker_action_request",
+        "action_name": action_name,
+        "endpoint": endpoint,
+        "method": request.method,
+        "content_type": request.content_type,
+        "content_length": request.content_length,
+        "looker_instance": request.headers.get("X-Looker-Instance"),
+        "payload": safe_payload,
+    }
+    app.logger.info(
+        "LOOKER_ACTION_REQUEST %s",
+        json.dumps(log_entry, ensure_ascii=False, separators=(",", ":")),
+    )
 
 
 def create_app(
@@ -126,6 +197,7 @@ def create_app(
         if action_name not in {ACTION_NAME, QUERY_ACTION_NAME}:
             return jsonify({"error": "Unknown action."}), 404
         payload = request.get_json(silent=True)
+        _log_looker_request(app, action_name, "form", payload)
         if not isinstance(payload, dict):
             payload = {}
         form_params = payload.get("form_params", {})
@@ -139,6 +211,7 @@ def create_app(
             return jsonify({"error": "Unknown action."}), 404
 
         payload = request.get_json(silent=True)
+        _log_looker_request(app, action_name, "execute", payload)
         if not isinstance(payload, dict):
             return looker_response(False, "Request body must be a JSON object.", 400)
 

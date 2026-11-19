@@ -56,6 +56,27 @@ For production, run with a WSGI server such as:
 gunicorn --bind "0.0.0.0:${PORT:-8080}" app:app
 ```
 
+## Cloud Logging request diagnostics
+
+The service logs JSON-encoded diagnostics for Looker form and execute requests
+at `INFO` level. The payload includes non-secret request fields, including SQL
+and submitted cell/form values. Authorization and cookie headers are not
+logged; payload fields that look like credentials, tokens, OAuth state, or
+signatures are redacted. JSON-encoded strings inside the payload are also
+checked for sensitive fields. Payload previews are capped at 180 KiB.
+
+Cloud Run forwards these application logs to Cloud Logging. For example:
+
+```sh
+gcloud run services logs read SERVICE \
+  --project=PROJECT_ID \
+  --region=REGION \
+  --freshness=1h
+```
+
+Because request logs can contain SQL and business data, restrict Cloud Logging
+access and retention to the appropriate operators.
+
 When adding the hub in Looker under **Admin > Actions**, use
 `ACTION_HUB_BASE_URL` as the hub URL and enter the exact value of
 `ACTION_HUB_TOKEN` as its authorization token. The service expects Looker's
