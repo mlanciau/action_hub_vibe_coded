@@ -155,7 +155,7 @@ def create_app(
                 "name": "looker_user_id",
                 "label": "Looker user ID",
                 "description": "Mapped to Looker's built-in id user attribute.",
-                "required": False,
+                "required": True,
                 "sensitive": False,
                 "user_attribute_name": "id",
             },
