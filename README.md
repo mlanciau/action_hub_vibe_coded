@@ -25,8 +25,16 @@ CREATE TABLE `your-project.your_dataset.looker_cell_actions` (
   generated_sql STRING,
   category STRING,
   notes STRING,
-  looker_instance STRING
+  looker_instance STRING,
+  looker_user_id STRING
 );
+```
+
+If the table already exists, add the `looker_user_id` column before deploying:
+
+```sql
+ALTER TABLE `your-project.your_dataset.looker_cell_actions`
+ADD COLUMN IF NOT EXISTS looker_user_id STRING;
 ```
 
 Grant the identity used by the action service permission to insert rows into
@@ -83,7 +91,8 @@ When adding the hub in Looker under **Admin > Actions**, use
 standard `Authorization: Token token="..."` header. Keep the token secret.
 
 After adding the hub, configure the required **BigQuery project ID**,
-**BigQuery dataset ID**, and **BigQuery table ID** parameters for each action
+**BigQuery dataset ID**, and **BigQuery table ID** parameters (and map
+**Looker user ID** to Looker's built-in `id` user attribute) for each action
 in Looker. The cell action continues to write the selected value;
 **Save Explore SQL to BigQuery** is a query-level action that writes the SQL
 with `field_value` left `NULL`.

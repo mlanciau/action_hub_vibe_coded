@@ -151,6 +151,14 @@ def create_app(
                 "sensitive": False,
                 "user_attribute_name": None,
             },
+            {
+                "name": "looker_user_id",
+                "label": "Looker user ID",
+                "description": "Mapped to Looker's built-in id user attribute.",
+                "required": False,
+                "sensitive": False,
+                "user_attribute_name": "id",
+            },
         ]
         shared_action_settings = {
             "form_url": f"{base_url}/actions/{ACTION_NAME}/form",
@@ -283,12 +291,23 @@ def create_app(
                 )
             destination[key] = value.strip()
 
+        raw_user_id = settings.get("looker_user_id")
+        if raw_user_id is None:
+            looker_user_id = None
+        elif isinstance(raw_user_id, str):
+            looker_user_id = raw_user_id.strip() or None
+        elif isinstance(raw_user_id, int) and not isinstance(raw_user_id, bool):
+            looker_user_id = str(raw_user_id)
+        else:
+            return looker_response(False, "Looker user ID must be text.", 400)
+
         row = build_row(
             field_value=field_value,
             category=category,
             notes=notes,
             looker_instance=request.headers.get("X-Looker-Instance"),
             generated_sql=generated_sql,
+            looker_user_id=looker_user_id,
         )
         table_id = (
             f"{destination['project_id']}."
@@ -386,6 +405,7 @@ def build_row(
     notes: str,
     looker_instance: str | None,
     generated_sql: str | None = None,
+    looker_user_id: str | None = None,
 ) -> dict[str, str | None]:
     return {
         "inserted_at": datetime.now(timezone.utc).isoformat(),
@@ -394,6 +414,7 @@ def build_row(
         "notes": notes,
         "looker_instance": looker_instance,
         "generated_sql": generated_sql,
+        "looker_user_id": looker_user_id,
     }
 
 

@@ -51,6 +51,11 @@ class ActionHubTest(unittest.TestCase):
         self.assertEqual(action["form_url"], (
             "https://actions.example.test/actions/bigquery_cell_capture/form"
         ))
+        user_id_param = next(
+            param for param in action["params"] if param["name"] == "looker_user_id"
+        )
+        self.assertEqual(user_id_param["user_attribute_name"], "id")
+        self.assertFalse(user_id_param["required"])
         query_action = response.get_json()["integrations"][1]
         self.assertEqual(query_action["name"], QUERY_ACTION_NAME)
         self.assertEqual(query_action["supported_action_types"], ["query"])
@@ -92,6 +97,7 @@ class ActionHubTest(unittest.TestCase):
                     "project_id": "demo-project",
                     "dataset_id": "feedback",
                     "table_id": "looker_cell_actions",
+                    "looker_user_id": "77",
                 },
                 "form_params": {"category": "review", "notes": "Verify this row"},
             },
@@ -111,6 +117,7 @@ class ActionHubTest(unittest.TestCase):
         self.assertEqual(row["category"], "review")
         self.assertEqual(row["notes"], "Verify this row")
         self.assertEqual(row["looker_instance"], "looker.example.test")
+        self.assertEqual(row["looker_user_id"], "77")
         self.assertIsNone(row["generated_sql"])
         self.assertTrue(row["inserted_at"].endswith("+00:00"))
 
@@ -140,6 +147,7 @@ class ActionHubTest(unittest.TestCase):
         assert self.client.inserted_rows is not None
         row = self.client.inserted_rows[0]
         self.assertIsNone(row["field_value"])
+        self.assertIsNone(row["looker_user_id"])
         self.assertEqual(row["generated_sql"], sql)
         self.assertEqual(row["category"], "review")
 
@@ -254,6 +262,27 @@ class ActionHubTest(unittest.TestCase):
                     "table_id": "looker_cell_actions",
                 },
                 "form_params": {"category": "not-a-category"},
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.get_json()["looker"]["success"])
+        self.assertIsNone(self.client.inserted_rows)
+
+    def test_execute_rejects_invalid_user_id_type(self):
+        response = self.http.post(
+            "/actions/bigquery_cell_capture/execute",
+            json={
+                "type": "cell",
+                "data": {
+                    "value": "customer-42",
+                    "project_id": "demo-project",
+                    "dataset_id": "feedback",
+                    "table_id": "looker_cell_actions",
+                    "looker_user_id": {"bad": "type"},
+                },
+                "form_params": {"category": "review"},
             },
             headers=self.headers,
         )
