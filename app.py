@@ -3,10 +3,13 @@ import json
 import logging
 import os
 import re
+import threading
+import time
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, render_template, request
 from google.api_core.exceptions import GoogleAPICallError
 from google.auth.exceptions import GoogleAuthError
 from google.cloud import bigquery
@@ -26,8 +29,45 @@ _SENSITIVE_LOG_KEY_PATTERN = re.compile(
 )
 _REDACTED_LOG_VALUE = "[REDACTED]"
 _MAX_LOG_PAYLOAD_BYTES = 180 * 1024
+_PUBLIC_READ_ENDPOINTS = frozenset({"health", "docs", "openapi_spec", "static"})
+_ALLOWED_HTTP_METHODS = frozenset({"GET", "HEAD", "POST"})
+_PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9.:-]{1,128}$")
+_BQ_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,1024}$")
+_DEFAULT_RATE_LIMIT_PER_MINUTE = 120
+_RATE_LIMIT_WINDOW_SECONDS = 60.0
 
 BigQueryClientFactory = Callable[[str], Any]
+
+
+class _SlidingWindowRateLimiter:
+    """Thread-safe per-IP sliding-window rate limiter.
+
+    TODO(security): For multi-instance horizontal scaling on Cloud Run, also
+    enforce distributed rate limiting via Cloud Armor or a shared store.
+    """
+
+    def __init__(self, max_requests: int, window_seconds: float) -> None:
+        self._max_requests = max_requests
+        self._window_seconds = window_seconds
+        self._buckets: dict[str, deque[float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str) -> bool:
+        if self._max_requests <= 0:
+            return True
+        now = time.monotonic()
+        cutoff = now - self._window_seconds
+        with self._lock:
+            timestamps = self._buckets.get(key)
+            if timestamps is None:
+                timestamps = deque()
+                self._buckets[key] = timestamps
+            while timestamps and timestamps[0] <= cutoff:
+                timestamps.popleft()
+            if len(timestamps) >= self._max_requests:
+                return False
+            timestamps.append(now)
+            return True
 
 
 def _redact_log_value(value: Any) -> Any:
@@ -95,15 +135,65 @@ def _log_looker_request(
 
 def create_app(
     bigquery_client_factory: BigQueryClientFactory | None = None,
+    rate_limit_per_minute: int | None = None,
 ) -> Flask:
     app = Flask(__name__)
     client_factory = bigquery_client_factory or (
         lambda project_id: bigquery.Client(project=project_id)
     )
+    configured_limit = rate_limit_per_minute
+    if configured_limit is None:
+        try:
+            configured_limit = int(
+                os.environ.get(
+                    "RATE_LIMIT_PER_MINUTE", str(_DEFAULT_RATE_LIMIT_PER_MINUTE)
+                )
+            )
+        except ValueError:
+            configured_limit = _DEFAULT_RATE_LIMIT_PER_MINUTE
+    rate_limiter = _SlidingWindowRateLimiter(
+        max_requests=configured_limit,
+        window_seconds=_RATE_LIMIT_WINDOW_SECONDS,
+    )
+
+    @app.after_request
+    def apply_security_headers(response):
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Permissions-Policy"] = (
+            "camera=(), microphone=(), geolocation=()"
+        )
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self'; "
+            "connect-src 'self'; "
+            "object-src 'none'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'"
+        )
+        return response
 
     @app.before_request
-    def authenticate_action_api():
-        if request.endpoint == "health":
+    def enforce_method_rate_and_auth():
+        if request.method not in _ALLOWED_HTTP_METHODS:
+            return jsonify({"error": "Method not allowed."}), 405
+
+        client_ip = (
+            request.access_route[-1]
+            if request.access_route
+            else (request.remote_addr or "unknown")
+        )
+        if not rate_limiter.allow(client_ip):
+            return jsonify({"error": "Rate limit exceeded."}), 429
+
+        if (
+            request.endpoint in _PUBLIC_READ_ENDPOINTS
+            and request.method in {"GET", "HEAD"}
+        ):
             return None
 
         token = os.environ.get("ACTION_HUB_TOKEN")
@@ -120,6 +210,14 @@ def create_app(
     @app.get("/health")
     def health():
         return jsonify({"status": "ok"})
+
+    @app.get("/docs", strict_slashes=False)
+    def docs():
+        return render_template("docs.html")
+
+    @app.get("/openapi.json")
+    def openapi_spec():
+        return jsonify(build_openapi_spec())
 
     @app.post("/")
     def list_actions():
@@ -289,7 +387,17 @@ def create_app(
                     f"Missing required action setting: {key}.",
                     400,
                 )
-            destination[key] = value.strip()
+            trimmed = value.strip()
+            pattern = (
+                _PROJECT_ID_PATTERN if key == "project_id" else _BQ_IDENTIFIER_PATTERN
+            )
+            if not pattern.fullmatch(trimmed):
+                return looker_response(
+                    False,
+                    f"Invalid BigQuery identifier for {key}.",
+                    400,
+                )
+            destination[key] = trimmed
 
         raw_user_id = settings.get("looker_user_id")
         if raw_user_id is None:
@@ -438,6 +546,114 @@ def looker_response(
         ),
         status_code,
     )
+
+
+def build_openapi_spec() -> dict[str, Any]:
+    """Return an OpenAPI 3.0.3 specification for the Action Hub endpoints."""
+    token_security = [{"lookerTokenAuth": []}]
+    return {
+        "openapi": "3.0.3",
+        "info": {
+            "title": "Looker BigQuery Cell Action Hub",
+            "version": "1.0.0",
+            "description": (
+                "Looker Action Hub API for saving cell values and Explore SQL "
+                "queries to BigQuery."
+            ),
+        },
+        "components": {
+            "securitySchemes": {
+                "lookerTokenAuth": {
+                    "type": "apiKey",
+                    "in": "header",
+                    "name": "Authorization",
+                    "description": 'Looker token header: Token token="<ACTION_HUB_TOKEN>"',
+                }
+            }
+        },
+        "paths": {
+            "/health": {
+                "get": {
+                    "summary": "Unauthenticated health check returning service status.",
+                    "responses": {"200": {"description": "Service is healthy."}},
+                }
+            },
+            "/openapi.json": {
+                "get": {
+                    "summary": "OpenAPI 3.0.3 specification for this Action Hub.",
+                    "responses": {"200": {"description": "OpenAPI JSON document."}},
+                }
+            },
+            "/docs": {
+                "get": {
+                    "summary": "Interactive API documentation and query tester UI.",
+                    "responses": {"200": {"description": "HTML documentation UI."}},
+                }
+            },
+            "/": {
+                "post": {
+                    "summary": "Discover available Looker integrations and parameters.",
+                    "security": token_security,
+                    "responses": {
+                        "200": {"description": "Looker Action Hub integration list."},
+                        "401": {"description": "Unauthorized."},
+                    },
+                }
+            },
+            "/actions/{action_name}/form": {
+                "post": {
+                    "summary": (
+                        "Return dynamic Looker form fields for bigquery_cell_capture "
+                        "or bigquery_query_sql_capture."
+                    ),
+                    "security": token_security,
+                    "parameters": [
+                        {
+                            "name": "action_name",
+                            "in": "path",
+                            "required": True,
+                            "schema": {
+                                "type": "string",
+                                "enum": [ACTION_NAME, QUERY_ACTION_NAME],
+                            },
+                        }
+                    ],
+                    "responses": {
+                        "200": {"description": "Looker form field definitions."},
+                        "401": {"description": "Unauthorized."},
+                        "404": {"description": "Unknown action."},
+                    },
+                }
+            },
+            "/actions/{action_name}/execute": {
+                "post": {
+                    "summary": (
+                        "Execute bigquery_cell_capture or bigquery_query_sql_capture "
+                        "and insert a row into BigQuery."
+                    ),
+                    "security": token_security,
+                    "parameters": [
+                        {
+                            "name": "action_name",
+                            "in": "path",
+                            "required": True,
+                            "schema": {
+                                "type": "string",
+                                "enum": [ACTION_NAME, QUERY_ACTION_NAME],
+                            },
+                        }
+                    ],
+                    "responses": {
+                        "200": {"description": "Row inserted into BigQuery."},
+                        "400": {"description": "Invalid Looker payload or form data."},
+                        "401": {"description": "Unauthorized."},
+                        "404": {"description": "Unknown action."},
+                        "502": {"description": "BigQuery write failed."},
+                    },
+                }
+            },
+        },
+    }
 
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))

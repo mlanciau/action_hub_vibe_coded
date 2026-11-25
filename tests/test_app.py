@@ -55,7 +55,7 @@ class ActionHubTest(unittest.TestCase):
             param for param in action["params"] if param["name"] == "looker_user_id"
         )
         self.assertEqual(user_id_param["user_attribute_name"], "id")
-        self.assertFalse(user_id_param["required"])
+        self.assertTrue(user_id_param["required"])
         query_action = response.get_json()["integrations"][1]
         self.assertEqual(query_action["name"], QUERY_ACTION_NAME)
         self.assertEqual(query_action["supported_action_types"], ["query"])
@@ -301,6 +301,70 @@ class ActionHubTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json(), {"status": "ok"})
+
+    def test_docs_and_openapi_are_public_with_security_headers_and_no_secrets(self):
+        docs_response = self.http.get("/docs")
+        self.assertEqual(docs_response.status_code, 200)
+        docs_html = docs_response.get_data(as_text=True)
+        self.assertIn("Looker BigQuery Action Hub", docs_html)
+        self.assertNotIn("test-token", docs_html)
+        self.assertEqual(docs_response.headers.get("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(docs_response.headers.get("X-Frame-Options"), "DENY")
+        self.assertEqual(docs_response.headers.get("Cache-Control"), "no-store")
+        csp = docs_response.headers.get("Content-Security-Policy", "")
+        self.assertIn("script-src 'self'", csp)
+        self.assertNotIn("unsafe-inline", csp)
+
+        docs_slash = self.http.get("/docs/")
+        self.assertEqual(docs_slash.status_code, 200)
+
+        js_response = self.http.get("/static/docs.js")
+        self.assertEqual(js_response.status_code, 200)
+        js_body = js_response.get_data(as_text=True)
+        js_response.close()
+        self.assertNotIn("innerHTML", js_body)
+        self.assertNotIn("localStorage", js_body)
+        self.assertNotIn("sessionStorage", js_body)
+
+        css_response = self.http.get("/static/docs.css")
+        self.assertEqual(css_response.status_code, 200)
+        css_response.close()
+
+        spec_response = self.http.get("/openapi.json")
+        self.assertEqual(spec_response.status_code, 200)
+        spec = spec_response.get_json()
+        self.assertEqual(spec["openapi"], "3.0.3")
+        self.assertIn("/actions/{action_name}/execute", spec["paths"])
+
+    def test_execute_rejects_invalid_bigquery_identifiers(self):
+        response = self.http.post(
+            f"/actions/{QUERY_ACTION_NAME}/execute",
+            json={
+                "type": "query",
+                "data": {
+                    "project_id": "demo-project",
+                    "dataset_id": "feedback;DROP",
+                    "table_id": "looker_cell_actions",
+                },
+                "attachment": {"data": {"sql": "SELECT 1"}},
+                "form_params": {"category": "review"},
+            },
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.get_json()["looker"]["success"])
+        self.assertIsNone(self.client.inserted_rows)
+
+    def test_disallowed_method_and_rate_limit_are_enforced(self):
+        trace_response = self.http.open("/", method="TRACE", headers=self.headers)
+        self.assertEqual(trace_response.status_code, 405)
+
+        limited_app = create_app(lambda _project_id: self.client, rate_limit_per_minute=2)
+        limited_client = limited_app.test_client()
+        self.assertEqual(limited_client.get("/health").status_code, 200)
+        self.assertEqual(limited_client.get("/health").status_code, 200)
+        self.assertEqual(limited_client.get("/health").status_code, 429)
 
 
 if __name__ == "__main__":

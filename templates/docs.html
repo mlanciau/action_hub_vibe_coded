@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Looker BigQuery Action Hub — Docs &amp; Query Tester</title>
+  <link rel="stylesheet" href="/static/docs.css">
+  <script src="/static/docs.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="container topbar-inner">
+      <div>
+        <h1>Looker BigQuery Action Hub</h1>
+        <p class="subtitle">Interactive API documentation &amp; query tester for Looker Action Hub</p>
+      </div>
+      <div class="topbar-links">
+        <a class="pill-link" href="/health" target="_blank" rel="noopener noreferrer">GET /health</a>
+        <a class="pill-link" href="/openapi.json" target="_blank" rel="noopener noreferrer">GET /openapi.json</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container layout">
+    <section class="card">
+      <div class="card-header">
+        <h2>1. Authentication &amp; Health</h2>
+        <span id="healthBadge" class="badge badge-neutral">Health: not checked</span>
+      </div>
+      <p class="hint">
+        Action Hub endpoints require <code>Authorization: Token token="..."</code>. The token stays in browser memory only and is never persisted to storage.
+      </p>
+      <div class="row">
+        <div class="field grow">
+          <label for="tokenInput">ACTION_HUB_TOKEN</label>
+          <div class="input-group">
+            <input id="tokenInput" type="password" autocomplete="off" spellcheck="false" placeholder="Paste ACTION_HUB_TOKEN">
+            <button id="toggleTokenBtn" type="button" class="btn btn-secondary">Show</button>
+          </div>
+        </div>
+        <div class="actions-inline">
+          <button id="checkHealthBtn" type="button" class="btn btn-secondary">Check /health</button>
+          <button id="listActionsBtn" type="button" class="btn btn-primary">List Actions (POST /)</button>
+        </div>
+      </div>
+      <div id="authOutputWrap" class="output-wrap hidden">
+        <div class="output-meta">
+          <span id="authStatusBadge" class="badge badge-neutral"></span>
+          <span id="authLatency" class="meta-text"></span>
+        </div>
+        <pre id="authOutput" class="code-block"></pre>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <h2>2. Interactive Query &amp; Cell Tester</h2>
+        <span id="modeBadge" class="badge badge-info">Query SQL Action</span>
+      </div>
+
+      <div class="grid-2">
+        <div class="field">
+          <label for="actionSelect">Action</label>
+          <select id="actionSelect">
+            <option value="bigquery_query_sql_capture">Save Explore SQL to BigQuery (bigquery_query_sql_capture)</option>
+            <option value="bigquery_cell_capture">Save cell to BigQuery (bigquery_cell_capture)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="lookerInstanceInput">X-Looker-Instance Header (optional)</label>
+          <input id="lookerInstanceInput" type="text" placeholder="e.g. looker-core-mlanciau">
+        </div>
+      </div>
+
+      <div class="grid-4">
+        <div class="field">
+          <label for="projectIdInput">BigQuery project_id</label>
+          <input id="projectIdInput" type="text" placeholder="mlanciau-looker-project">
+        </div>
+        <div class="field">
+          <label for="datasetIdInput">BigQuery dataset_id</label>
+          <input id="datasetIdInput" type="text" placeholder="writeback">
+        </div>
+        <div class="field">
+          <label for="tableIdInput">BigQuery table_id</label>
+          <input id="tableIdInput" type="text" placeholder="writeback_table_mlanciau">
+        </div>
+        <div class="field">
+          <label for="userIdInput">looker_user_id (optional in test)</label>
+          <input id="userIdInput" type="text" placeholder="1">
+        </div>
+      </div>
+
+      <div id="queryFieldsSection" class="field">
+        <div class="label-row">
+          <label for="sqlInput">Generated SQL (<code>attachment.data.sql</code>)</label>
+          <button id="sampleQueryBtn" type="button" class="btn btn-link">Load sample query</button>
+        </div>
+        <textarea id="sqlInput" rows="6" spellcheck="false" placeholder="SELECT 1 AS test_value"></textarea>
+      </div>
+
+      <div id="cellFieldsSection" class="field hidden">
+        <label for="cellValueInput">Cell Value (<code>data.value</code>)</label>
+        <input id="cellValueInput" type="text" placeholder="customer-42">
+      </div>
+
+      <div class="grid-2">
+        <div class="field">
+          <label for="categorySelect">Form: Category</label>
+          <select id="categorySelect">
+            <option value="review">Review (review)</option>
+            <option value="follow_up">Follow up (follow_up)</option>
+            <option value="ignore">Ignore (ignore)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="notesInput">Form: Notes</label>
+          <input id="notesInput" type="text" placeholder="Testing from /docs UI">
+        </div>
+      </div>
+
+      <div class="toolbar">
+        <button id="fetchFormBtn" type="button" class="btn btn-secondary">Fetch Form Schema (POST /form)</button>
+        <button id="executeActionBtn" type="button" class="btn btn-primary">Execute Action (POST /execute)</button>
+      </div>
+
+      <div class="grid-2 output-grid">
+        <div>
+          <div class="output-meta">
+            <span class="meta-title">Request Payload Preview</span>
+            <span id="requestEndpointLabel" class="meta-text"></span>
+          </div>
+          <pre id="requestPreview" class="code-block"></pre>
+        </div>
+        <div>
+          <div class="output-meta">
+            <span class="meta-title">Response</span>
+            <span id="responseStatusBadge" class="badge badge-neutral">Not sent</span>
+            <span id="responseLatency" class="meta-text"></span>
+          </div>
+          <pre id="responseOutput" class="code-block">Click "Execute Action" or "Fetch Form Schema" to test.</pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <h2>3. OpenAPI Endpoints Reference</h2>
+        <span id="specVersionBadge" class="badge badge-neutral">OpenAPI</span>
+      </div>
+      <div id="endpointsContainer" class="endpoints-list"></div>
+    </section>
+  </main>
+</body>
+</html>

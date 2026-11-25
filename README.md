@@ -126,4 +126,7 @@ python -m unittest discover -s tests
 ```
 
 The service also exposes an unauthenticated `GET /health` endpoint for
-deployment health checks. Action API endpoints require the configured token.
+deployment health checks, plus `GET /docs` and `GET /openapi.json` for an
+interactive API explorer and query/cell tester (which still requires entering
+`ACTION_HUB_TOKEN` to invoke Action API endpoints). Action API endpoints require
+the configured token.
